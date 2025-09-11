@@ -10,5 +10,8 @@ COPY . /app
 WORKDIR /app
 RUN uv sync --locked --no-cache
 
+RUN uv run ruff check
+
+ENV NODE_ENV=production
 # Run the application.
 CMD ["/app/.venv/bin/fastapi", "run", "app/main.py", "--port", "80"]

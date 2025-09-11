@@ -13,4 +13,7 @@ wheels/
 
 # Environment variables
 .env*
-!.env.example
+
+.git*
+README.md
+Makefile
