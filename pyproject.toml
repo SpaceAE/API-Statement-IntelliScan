@@ -1,0 +1,30 @@
+[project]
+name = "Api-Statement-Intelliscan"
+version = "0.1.0"
+description = "RESTful api for AI scan statement"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi[standard]>=0.116.1",
+    "pydantic-settings>=2.10.1",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.3.0",
+    "ruff>=0.13.0",
+]
+
+[tool.ruff]
+line-length = 88
+indent-width = 4
+target-version = "py313"
+exclude = [".venv", ".git", "__pycache__"]
+
+[tool.ruff.lint]
+select = ["FAST", "E", "F", "I"]
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "tab"
+exclude = [".venv", ".git", "__pycache__"]
