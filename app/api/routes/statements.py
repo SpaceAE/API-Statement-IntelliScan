@@ -1,12 +1,11 @@
 from fastapi import APIRouter
 
 router = APIRouter(
-	prefix='/predicts',
-	tags=['predicts'],
-	responses={404: {'message': 'Not found'}},
+	prefix='/statements',
+	tags=['statements'],
 )
 
 
-@router.post('/')
+@router.post('/predict')
 async def predict():
 	return {'message': 'This is endpoint to predict.'}

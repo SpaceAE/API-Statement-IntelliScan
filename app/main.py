@@ -1,10 +1,24 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .configs.env import env
-from .routers import predicts
+from .api.main import api_router
+from .core.config import settings
+from .core.model import get_model
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+	get_model()
+	yield
+
+
+app = FastAPI(
+	title=settings.PROJECT_NAME,
+	openapi_url=f'{settings.API_PREFIX}/openapi.json',
+	lifespan=lifespan,
+)
 
 origins = [
 	'*',
@@ -18,9 +32,5 @@ app.add_middleware(
 	allow_headers=['*'],
 )
 
-app.include_router(predicts.router)
 
-
-@app.get('/')
-def root():
-	return {'message': f'server is running {env.message}'}
+app.include_router(api_router, prefix=settings.API_PREFIX)
