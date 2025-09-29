@@ -9,7 +9,7 @@ class Settings(BaseSettings):
 		env_ignore_empty=True,
 	)
 
-	PROJECT_NAME: str
+	PROJECT_NAME: str = 'API Statement IntelliScan'
 
 	ENVIRONMENT: Literal['development', 'production'] = 'development'
 	API_PREFIX: str = '/api/v1'

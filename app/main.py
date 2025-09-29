@@ -17,7 +17,8 @@ from .core.model import get_model
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-	get_model()
+	if settings.ENVIRONMENT == 'production':
+		get_model()
 	yield
 
 
