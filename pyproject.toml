@@ -5,8 +5,10 @@ description = "RESTful api for AI scan statement"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "cryptography>=46.0.2",
     "fastapi[standard]>=0.116.1",
     "pydantic-settings>=2.10.1",
+    "pypdf>=6.1.1",
     "tensorflow>=2.20.0",
 ]
 
