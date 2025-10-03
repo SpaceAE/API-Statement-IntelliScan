@@ -3,7 +3,7 @@ name = "Api-Statement-Intelliscan"
 version = "0.1.0"
 description = "RESTful api for AI scan statement"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.9,<3.13"
 dependencies = [
     "cryptography>=46.0.2",
     "fastapi[standard]>=0.116.1",
