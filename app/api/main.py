@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
-from app.api.routes import statements
+from app.api.routes import health, statements
 
 api_router = APIRouter()
 api_router.include_router(statements.router)
+api_router.include_router(health.router)
