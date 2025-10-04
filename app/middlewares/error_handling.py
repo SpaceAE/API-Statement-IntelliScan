@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import List
 
 from fastapi import HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -25,26 +25,23 @@ async def validation_exception_handler(
 	_: Request, exc: RequestValidationError
 ) -> JSONResponse:
 	"""Handle validation errors and format them into a user-friendly response."""
-	missing_fields: Dict[str, List[str]] = {}
+	error_details: List[str] = []
+	print(exc.errors())
 
 	for error in exc.errors():
-		if error['type'] == 'missing':
-			field_path = error['loc']
-			[parent_field, missing_field] = field_path
-			missing_fields.setdefault(parent_field, []).append(missing_field)
+		loc = ' -> '.join(str(x) for x in error.get('loc', []))
+		err_type = error.get('type', 'unknown')
+		msg = error.get('msg', 'Invalid value')
 
-	if not missing_fields:
-		error_message = 'Validation error occurred'
-	else:
-		field_descriptions = [
-			f'{field} ({", ".join(fields)})' for field, fields in missing_fields.items()
-		]
-		error_message = f'Required {" ".join(field_descriptions)}'
+		if err_type == 'missing':
+			error_details.append(f'Missing required field: {loc}')
+		else:
+			error_details.append(f'{loc}: {msg}')
 
 	return JSONResponse(
 		status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
 		content={
-			'message': 'Missing required fields',
-			'errors': error_message,
+			'message': 'Validation error',
+			'errors': error_details,
 		},
 	)

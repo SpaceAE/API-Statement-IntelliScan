@@ -66,11 +66,20 @@ router = APIRouter(
 			'content': {
 				'application/json': {
 					'examples': {
+						'validation_error': {
+							'summary': 'Validation error',
+							'value': {
+								'message': 'Validation error',
+								'errors': [
+									"body -> file: Value error, Expected UploadFile, received: <class 'str'>"  # noqa: E501
+								],
+							},
+						},
 						'missing_required_field': {
 							'summary': 'Missing Required Field',
 							'value': {
-								'message': 'Missing required fields',
-								'errors': 'Required body (file)',
+								'message': 'Validation error',
+								'errors': ['Missing required field: body -> file'],
 							},
 						},
 						'password_required': {
