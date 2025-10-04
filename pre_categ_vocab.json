@@ -1,0 +1,13 @@
+{
+  "tx_vocab": [
+    "C1",
+    "C2",
+    "X1",
+    "X2"
+  ],
+  "ch_vocab": [
+    "ATM",
+    "ATS",
+    "ENET"
+  ]
+}
