@@ -3,12 +3,19 @@ name = "Api-Statement-Intelliscan"
 version = "0.1.0"
 description = "RESTful api for AI scan statement"
 readme = "README.md"
-requires-python = ">=3.9,<3.13"
+requires-python = ">=3.10,<3.14"
 dependencies = [
     "cryptography>=46.0.2",
     "fastapi[standard]>=0.116.1",
+    "joblib>=1.5.2",
+    "pandas>=2.3.3",
+    "pdfminer-six>=20250506",
+    "pdfplumber>=0.11.7",
+    "pillow>=11.3.0",
     "pydantic-settings>=2.10.1",
     "pypdf>=6.1.1",
+    "pytesseract>=0.3.13",
+    "scikit-learn>=1.6.1",
     "tensorflow>=2.20.0",
 ]
 

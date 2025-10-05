@@ -1,12 +1,29 @@
-from typing import Literal
+from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import List
+
+from pydantic import BaseModel
 
 
 class PredictResponse(BaseModel):
-	prediction: Literal['fraud', 'normal'] = Field(
-		..., description='The predicted class label'
-	)
-	confidence: float = Field(
-		..., ge=0, le=1, description='The confidence score of the prediction'
-	)
+	prediction: str
+	confidence: float
+
+
+class TxResult(BaseModel):
+	idx: int
+	tx_datetime: str
+	code_channel_raw: str
+	debit_amount: float
+	credit_amount: float
+	balance_amount: float
+	description_text: str
+	fraud_score: float
+	is_fraud: bool
+
+
+class PredictResponseWithDetails(PredictResponse):
+	threshold: float
+	fraud_count: int
+	total: int
+	transactions: List[TxResult]

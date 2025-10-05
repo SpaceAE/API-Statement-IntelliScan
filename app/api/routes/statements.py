@@ -1,115 +1,53 @@
+# app/api/routes/statements.py
+import io
+import os
 from typing import Annotated
 
-from fastapi import APIRouter, Form, HTTPException
+import pandas as pd
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
 from app.core.file import (
 	IncorrectPasswordException,
 	PasswordRequiredException,
 	read_file,
 )
+from app.core.model import predict_proba_df, summarize_document
+from app.core.pdf_to_csv import extract_statement_df
 from app.models.request import PredictForm
-from app.models.response import PredictResponse
-
-router = APIRouter(
-	prefix='/statements',
-	tags=['Statements'],
+from app.models.response import (
+	PredictResponseWithDetails,
+	TxResult,
 )
+
+APP_DEBUG = os.getenv('APP_DEBUG', '1') in ('1', 'true', 'True')
+
+router = APIRouter(prefix='/statements', tags=['Statements'])
 
 
 @router.post(
 	'/predict',
 	summary='Analyze Statement Risk',
-	description='Analyze and classify statement documents for risk assessment',
+	description=(
+		'Unlocks the PDF (if encrypted), '
+		'extracts transactions into a normalized DataFrame, '
+		'converts the rows to CSV in-memory for a consistent model '
+		'input format, reloads it, scores each transaction with the '
+		'fraud model, and returns a JSON summary + per-row details.'
+	),
 	responses={
-		200: {
-			'description': 'Successful Response',
-			'content': {
-				'application/json': {
-					'example': {'prediction': 'fraud', 'confidence': 0.91}
-				}
-			},
-		},
-		400: {
-			'description': 'Bad Request',
-			'content': {
-				'application/json': {
-					'examples': {
-						'invalid_file_type': {
-							'summary': 'Invalid file type',
-							'value': {
-								'message': (
-									'Invalid file type. Only PDF files are accepted.'
-								)
-							},
-						},
-					}
-				}
-			},
-		},
-		403: {
-			'description': 'Forbidden',
-			'content': {
-				'application/json': {
-					'examples': {
-						'incorrect_password': {
-							'summary': 'Incorrect Password',
-							'value': {
-								'message': 'Incorrect password for the encrypted PDF.'
-							},
-						},
-					}
-				}
-			},
-		},
-		422: {
-			'description': 'Unprocessable Entity',
-			'content': {
-				'application/json': {
-					'examples': {
-						'validation_error': {
-							'summary': 'Validation error',
-							'value': {
-								'message': 'Validation error',
-								'errors': [
-									"body -> file: Value error, Expected UploadFile, received: <class 'str'>"  # noqa: E501
-								],
-							},
-						},
-						'missing_required_field': {
-							'summary': 'Missing Required Field',
-							'value': {
-								'message': 'Validation error',
-								'errors': ['Missing required field: body -> file'],
-							},
-						},
-						'password_required': {
-							'summary': 'Password Required',
-							'value': {
-								'message': (
-									'Password is required for this encrypted PDF.'
-								)
-							},
-						},
-					}
-				}
-			},
-		},
-		500: {
-			'description': 'Internal Server Error',
-			'content': {
-				'application/json': {
-					'example': {
-						'message': 'Internal server error',
-					}
-				}
-			},
-		},
+		200: {'description': 'OK'},
+		400: {'description': 'Invalid file'},
+		403: {'description': 'Wrong password'},
+		422: {'description': 'No transactions / Validation'},
+		500: {'description': 'Internal error'},
 	},
 )
 async def predict(
-	form: Annotated[PredictForm, Form(media_type='multipart/form-data')],
-) -> PredictResponse:
+	form: Annotated[PredictForm, Depends(PredictForm.as_form)],
+) -> PredictResponseWithDetails:
 	file, password = form.file, form.password
+
 	if (
 		file.content_type != 'application/pdf'
 		or file.filename.split('.')[-1].lower() != 'pdf'
@@ -121,12 +59,68 @@ async def predict(
 
 	try:
 		read_file(file.file, password)
+		file.file.seek(0)
 
-		# Dummy prediction logic for demonstration purposes
-		return PredictResponse(
-			prediction='normal',
-			confidence=0.95,
+		# ดึงพร้อม meta เพื่อช่วย debug บน Swagger เมื่อเปิด APP_DEBUG
+		df, meta = extract_statement_df(file.file, password=password, return_meta=True)  # type: ignore
+		if df.empty:
+			detail = {'message': 'No transactions detected in the PDF.'}
+			if APP_DEBUG:
+				detail['debug'] = meta  # แสดงจำนวนตาราง/บรรทัดที่ตรวจพบ
+			raise HTTPException(status_code=422, detail=detail)
+
+		required_cols = [
+			'tx_datetime',
+			'code_channel_raw',
+			'debit_amount',
+			'credit_amount',
+			'balance_amount',
+			'description_text',
+		]
+		missing = [c for c in required_cols if c not in df.columns]
+		if missing:
+			raise HTTPException(
+				status_code=422,
+				detail={'message': f'Missing required columns: {missing}'},
+			)
+
+		df_model = df[required_cols].copy()
+		for num_col in ['debit_amount', 'credit_amount', 'balance_amount']:
+			df_model[num_col] = pd.to_numeric(
+				df_model[num_col], errors='coerce'
+			).fillna(0.0)
+
+		# โมเดลอ่านจาก DataFrame ได้โดยตรง (ไม่จำเป็นต้องผ่าน CSV อีกต่อ)
+		probas = predict_proba_df(df_model)
+		threshold = float(os.getenv('MODEL_THRESHOLD', '0.5'))
+		summary = summarize_document(probas, threshold=threshold)
+
+		items = []
+		for i, row in df_model.reset_index(drop=True).iterrows():
+			p = float(probas.loc[i])
+			items.append(
+				TxResult(
+					idx=int(i),
+					tx_datetime=str(row.tx_datetime),
+					code_channel_raw=str(row.code_channel_raw),
+					debit_amount=float(row.debit_amount),
+					credit_amount=float(row.credit_amount),
+					balance_amount=float(row.balance_amount),
+					description_text=str(row.description_text),
+					fraud_score=round(p, 4),
+					is_fraud=bool(p >= threshold),
+				)
+			)
+
+		return PredictResponseWithDetails(
+			prediction=summary['prediction'],
+			confidence=summary['confidence'],
+			threshold=summary['threshold'],
+			fraud_count=summary['fraud_count'],
+			total=summary['total'],
+			transactions=items,
 		)
+
 	except IncorrectPasswordException:
 		raise HTTPException(
 			status_code=403,
@@ -136,4 +130,95 @@ async def predict(
 		raise HTTPException(
 			status_code=422,
 			detail={'message': 'Password is required for this encrypted PDF.'},
+		)
+	except Exception as e:
+		raise HTTPException(
+			status_code=500,
+			detail={'message': 'Internal server error', 'error': str(e)},
+		)
+
+
+@router.post(
+	'/predict:csv',
+	summary='Analyze Statement Risk and return CSV',
+	description=(
+		'Upload an encrypted PDF statement, extract transactions, '
+		'score fraud risk, and download as CSV.'
+	),
+)
+async def predict_csv(form: Annotated[PredictForm, Depends(PredictForm.as_form)]):
+	file, password = form.file, form.password
+
+	if (
+		file.content_type != 'application/pdf'
+		or file.filename.split('.')[-1].lower() != 'pdf'
+	):
+		raise HTTPException(
+			status_code=400,
+			detail={'message': 'Invalid file type. Only PDF files are accepted.'},
+		)
+
+	try:
+		read_file(file.file, password)
+		file.file.seek(0)
+
+		df = extract_statement_df(file.file, password=password)
+		if df.empty:
+			raise HTTPException(
+				status_code=422,
+				detail={'message': 'No transactions detected in the PDF.'},
+			)
+
+		required_cols = [
+			'tx_datetime',
+			'code_channel_raw',
+			'debit_amount',
+			'credit_amount',
+			'balance_amount',
+			'description_text',
+		]
+		missing = [c for c in required_cols if c not in df.columns]
+		if missing:
+			raise HTTPException(
+				status_code=422,
+				detail={'message': f'Missing required columns: {missing}'},
+			)
+
+		df_model = df[required_cols].copy()
+		for num_col in ['debit_amount', 'credit_amount', 'balance_amount']:
+			df_model[num_col] = pd.to_numeric(
+				df_model[num_col], errors='coerce'
+			).fillna(0.0)
+
+		probas = predict_proba_df(df_model)
+		threshold = float(os.getenv('MODEL_THRESHOLD', '0.5'))
+
+		scored_df = df_model.copy()
+		scored_df['fraud_score'] = probas.astype(float).round(6)
+		scored_df['is_fraud'] = (probas >= threshold).astype(bool)
+
+		csv_bytes = scored_df.to_csv(index=False).encode('utf-8')
+		fname_base = (file.filename or 'statement.pdf').rsplit('.', 1)[0]
+		fname = f'{fname_base}_predicted.csv'
+
+		return StreamingResponse(
+			io.BytesIO(csv_bytes),
+			media_type='text/csv',
+			headers={'Content-Disposition': f'attachment; filename="{fname}"'},
+		)
+
+	except IncorrectPasswordException:
+		raise HTTPException(
+			status_code=403,
+			detail={'message': 'Incorrect password for the encrypted PDF.'},
+		)
+	except PasswordRequiredException:
+		raise HTTPException(
+			status_code=422,
+			detail={'message': 'Password is required for this encrypted PDF.'},
+		)
+	except Exception as e:
+		raise HTTPException(
+			status_code=500,
+			detail={'message': 'Internal server error', 'error': str(e)},
 		)

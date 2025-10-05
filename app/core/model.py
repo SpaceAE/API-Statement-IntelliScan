@@ -2,6 +2,7 @@
 import json
 import os
 import threading
+from typing import Any, Dict, Tuple
 
 import joblib
 import numpy as np
@@ -11,12 +12,10 @@ import tensorflow as tf
 
 load_model = tf.keras.models.load_model  # ใช้ผ่าน tf แทนการ import submodule ตรง
 
-
 ARTIFACT_DIR = os.environ.get(
 	'MODEL_DIR',
 	'/Users/wysuttida/pattern-project/API-Statement-IntelliScan',
 )
-
 
 NUMERIC_FEATURES = [
 	'debit_amount',
@@ -34,7 +33,6 @@ NUMERIC_FEATURES = [
 ]
 TEXT_FEATURE = 'description_text'
 
-
 _lock = threading.Lock()
 _STATE = {
 	'loaded': False,
@@ -49,12 +47,16 @@ _STATE = {
 }
 
 
+# =========================
+# Loading Artifacts
+# =========================
 def _load_artifacts_once():
 	if _STATE['loaded']:
 		return
 	with _lock:
 		if _STATE['loaded']:
 			return
+
 		model_path = os.path.join(ARTIFACT_DIR, 'model.h5')
 		scaler_path = os.path.join(ARTIFACT_DIR, 'pre_scaler.joblib')
 		tfidf_path = os.path.join(ARTIFACT_DIR, 'pre_tfidf.joblib')
@@ -88,6 +90,9 @@ def get_model():
 	return _STATE['model']
 
 
+# =========================
+# Feature Utils
+# =========================
 def _one_hot_from_vocab(series_str: pd.Series, index_map: dict, vocab_size: int):
 	arr = series_str.astype(str).map(index_map).to_numpy()
 	N = len(arr)
@@ -100,15 +105,23 @@ def _one_hot_from_vocab(series_str: pd.Series, index_map: dict, vocab_size: int)
 	)
 
 
-def _preprocess_row_to_df(payload: dict) -> pd.DataFrame:
+def _split_code_channel(ccr: str) -> Tuple[str, str]:
+	"""
+	แยก 'CODE/CHANNEL' → (tx_code, channel)
+	"""
+	s = str(ccr or '')
+	parts = s.split('/', 1)
+	tx_code = parts[0].strip() if len(parts) > 0 else ''
+	channel = parts[1].strip() if len(parts) > 1 else ''
+	return tx_code, channel
+
+
+def _preprocess_row_to_df(payload: Dict[str, Any]) -> pd.DataFrame:
 	tx_datetime = pd.to_datetime(payload.get('tx_datetime', None), errors='coerce')
 	if pd.isna(tx_datetime):
 		tx_datetime = pd.Timestamp.utcnow()
 
-	ccr = str(payload.get('code_channel_raw', ''))  # "CODE/CHANNEL"
-	sp_ = ccr.split('/', 1)
-	tx_code = sp_[0].strip() if len(sp_) > 0 else ''
-	channel = sp_[1].strip() if len(sp_) > 1 else ''
+	tx_code, channel = _split_code_channel(payload.get('code_channel_raw', ''))
 
 	debit = float(payload.get('debit_amount', 0) or 0)
 	credit = float(payload.get('credit_amount', 0) or 0)
@@ -129,6 +142,7 @@ def _preprocess_row_to_df(payload: dict) -> pd.DataFrame:
 		]
 	)
 
+	# engineered features
 	df['net_amount'] = df['credit_amount'] - df['debit_amount']
 	df['abs_amount'] = df['debit_amount'].abs() + df['credit_amount'].abs()
 	df['log1p_amount'] = np.log1p(df['abs_amount'])
@@ -142,6 +156,40 @@ def _preprocess_row_to_df(payload: dict) -> pd.DataFrame:
 	df['year'] = dt.dt.year
 
 	df['description_text'] = df['description_text'].astype(str)
+	return df
+
+
+def _preprocess_df_from_transactions(df_in: pd.DataFrame) -> pd.DataFrame:
+	df = df_in.copy()
+
+	# datetime
+	dt = pd.to_datetime(df['tx_datetime'], errors='coerce')
+	dt = dt.fillna(pd.Timestamp.utcnow())
+	df['tx_datetime'] = dt
+
+	# split code/channel
+	tx_ch = df['code_channel_raw'].astype(str).apply(_split_code_channel)
+	df['tx_code'] = tx_ch.map(lambda t: t[0])
+	df['channel'] = tx_ch.map(lambda t: t[1])
+
+	# numeric safety
+	for col in ['debit_amount', 'credit_amount', 'balance_amount']:
+		df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0).astype(float)
+
+	df['description_text'] = df['description_text'].astype(str)
+
+	# engineered features
+	df['net_amount'] = df['credit_amount'] - df['debit_amount']
+	df['abs_amount'] = df['debit_amount'].abs() + df['credit_amount'].abs()
+	df['log1p_amount'] = np.log1p(df['abs_amount'])
+
+	df['hour'] = dt.dt.hour
+	df['dayofweek'] = dt.dt.dayofweek
+	df['is_weekend'] = (df['dayofweek'] >= 5).astype(int)
+	df['day'] = dt.dt.day
+	df['month'] = dt.dt.month
+	df['year'] = dt.dt.year
+
 	return df
 
 
@@ -159,7 +207,10 @@ def _transform_df_to_X(df: pd.DataFrame):
 	return sp.hstack([X_num, X_tx, X_ch, X_txt], format='csr', dtype=np.float32)
 
 
-def predict_one(payload: dict):
+# =========================
+# Predict APIs
+# =========================
+def predict_one(payload: Dict[str, Any]) -> Dict[str, Any]:
 	_load_artifacts_once()
 	df = _preprocess_row_to_df(payload)
 	X = _transform_df_to_X(df).toarray()
@@ -169,4 +220,26 @@ def predict_one(payload: dict):
 	return {'score': score, 'label': label, 'threshold': thr}
 
 
-__all__ = ['get_model', 'predict_one']
+def predict_proba_df(df: pd.DataFrame) -> pd.Series:
+	_load_artifacts_once()
+	prep = _preprocess_df_from_transactions(df)
+	X = _transform_df_to_X(prep).toarray()  # แปลงเป็น dense ให้ Keras รับได้
+	probs = _STATE['model'].predict(X, verbose=0).ravel().astype(float)
+	return pd.Series(probs, index=df.index, dtype=float)
+
+
+def summarize_document(probas: pd.Series, threshold: float = 0.5) -> Dict[str, Any]:
+	total = int(probas.shape[0]) if probas is not None else 0
+	fraud_count = int((probas >= threshold).sum()) if total else 0
+	prediction = 'fraud' if fraud_count > 0 else 'safe'
+	confidence = float(probas.max()) if total else 0.0
+	return {
+		'prediction': prediction,
+		'confidence': round(confidence, 4),
+		'threshold': float(threshold),
+		'fraud_count': fraud_count,
+		'total': total,
+	}
+
+
+__all__ = ['get_model', 'predict_one', 'predict_proba_df', 'summarize_document']
