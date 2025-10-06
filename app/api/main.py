@@ -11,5 +11,4 @@ def health():
 	return {'status': 'ok'}
 
 
-# รวม router ของ statements ให้อยู่ใต้ /statements
-api_router.include_router(statements_router, prefix='/statements', tags=['Statements'])
+api_router.include_router(statements_router)  # ไม่ต้องใส่ prefix ซ้ำ

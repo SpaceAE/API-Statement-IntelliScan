@@ -5,11 +5,6 @@ from typing import List
 from pydantic import BaseModel
 
 
-class PredictResponse(BaseModel):
-	prediction: str
-	confidence: float
-
-
 class TxResult(BaseModel):
 	idx: int
 	tx_datetime: str
@@ -22,8 +17,12 @@ class TxResult(BaseModel):
 	is_fraud: bool
 
 
-class PredictResponseWithDetails(PredictResponse):
+class PredictResponseWithDetails(BaseModel):
+	prediction: str
+	confidence: float
 	threshold: float
 	fraud_count: int
 	total: int
 	transactions: List[TxResult]
+	fraud_transactions: List[TxResult] = []
+	fraud_indices: List[int] = []
