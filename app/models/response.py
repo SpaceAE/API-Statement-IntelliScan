@@ -43,6 +43,9 @@ class PredictResponse(BaseModel):
 	fraud_count: Optional[int] = Field(
 		None, ge=0, description='The number of transactions predicted as fraud'
 	)
+	transactions_count: Optional[int] = Field(
+		None, ge=0, description='The total number of transactions processed'
+	)
 	transactions: Optional[list[TransactionResult]] = Field(
 		None, description='List of transaction results with fraud scores'
 	)
