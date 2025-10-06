@@ -13,28 +13,27 @@ class PasswordRequiredException(Exception):
 
 
 def read_file(file: BinaryIO, password: Optional[str]) -> bytes:
-	"""
-	อ่านไฟล์อัปโหลดเป็น bytes
-	- ถ้าเป็น PDF ที่เข้ารหัส: ตรวจรหัสผ่าน (ถ้าไม่ให้/ให้ผิด -> raise)
-	- คืน bytes เพื่อให้สาขา PDF/CSV/XLSX ใช้ต่อได้
-	"""
 	data = file.read()
 
-	# ลองเปิดด้วย PdfReader เพื่อตรวจว่าเป็น PDF และ encrypted ไหม
-	try:
-		reader = PdfReader(io.BytesIO(data))
-		if reader.is_encrypted:
-			if not password:
-				raise PasswordRequiredException(
-					'Password is required for this encrypted PDF.'
-				)
-			ok = reader.decrypt(password)
-			if not ok:
-				raise IncorrectPasswordException(
-					'Incorrect password for the encrypted PDF.'
-				)
-	except Exception:
-		# ไม่ใช่ PDF ก็ไม่เป็นไร ปล่อยให้สาขา CSV/XLSX ไปจัดการต่อ
-		pass
+	# ตรวจด้วย magic header ก่อนว่าเป็น PDF จริง
+	is_probably_pdf = data[:5] == b'%PDF-'
+
+	if is_probably_pdf:
+		try:
+			reader = PdfReader(io.BytesIO(data))
+			if reader.is_encrypted:
+				if not password:
+					raise PasswordRequiredException('Password is required for PDF.')
+				result = reader.decrypt(password)
+				# pypdf: 0=fail, 1 or 2 = success
+				if result not in (1, 2):
+					raise IncorrectPasswordException('Incorrect password for PDF.')
+		except IncorrectPasswordException:
+			raise
+		except PasswordRequiredException:
+			raise
+		except Exception:
+			# ถ้าอ่านโครงสร้าง pdf ไม่ได้ ปล่อยให้ไปแตกแขนงต่อ (จะไปตก PARSE_FAILED ทีหลัง)
+			pass
 
 	return data

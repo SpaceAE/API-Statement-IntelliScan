@@ -923,6 +923,58 @@ def _infer_header_bounds_from_top(page) -> List[Tuple[str, float, float]]:
 	return bounds
 
 
+def _get_desc_x0(bounds: List[Tuple[str, float, float]], page_width: float) -> float:
+	"""
+	คืนค่า x0 ของคอลัมน์ description_text ถ้ามีใน bounds
+	ถ้าไม่มี ให้ fallback เป็นสัดส่วนคงที่ (เช่น 0.74 ของความกว้างหน้า)
+	"""
+	for k, x0, x1 in bounds:
+		if k == 'description_text':
+			return float(x0)
+	return page_width * 0.74  # fallback ตาม SCB_RELATIVE_BOUNDS
+
+
+def _collect_desc_block_text(page, y0: float, y1: float, desc_x0: float) -> str:
+	"""
+	เก็บคำทั้งหมดในกรอบ (x >= desc_x0) และ y อยู่ระหว่าง [y0, y1]
+	เรียงตาม y จากบนลงล่าง แล้วต่อเป็นข้อความบรรทัดเดียว (คั่นด้วยเว้นวรรค)
+	หมายเหตุ: ใช้ extract_words เพื่อให้แม่นยำกว่า extract_text ในเคสคอลัมน์
+	"""
+	words = page.extract_words(extra_attrs=['x0', 'x1', 'top', 'bottom', 'text']) or []
+	y_tol = 1.0
+	lines: list[list[dict]] = []
+	curr: list[dict] = []
+
+	# เลือกเฉพาะคำที่อยู่ในโซน Description/Note
+	tokens = [
+		w
+		for w in words
+		if (
+			(w['x0'] >= desc_x0 - 1)
+			and (w['top'] >= y0 - y_tol)
+			and (w['bottom'] <= y1 + y_tol)
+		)
+	]
+	tokens.sort(key=lambda d: (d['top'], d['x0']))
+
+	for w in tokens:
+		if not curr or abs(curr[0]['top'] - w['top']) <= 4.5:
+			curr.append(w)
+		else:
+			lines.append(curr)
+			curr = [w]
+	if curr:
+		lines.append(curr)
+
+	# ต่อ token เป็น text ต่อบรรทัด แล้วรวมทั้งบล็อก
+	parts: list[str] = []
+	for ln in lines:
+		txt = ' '.join(t['text'] for t in ln if t.get('text')).strip()
+		if txt:
+			parts.append(txt)
+	return ' '.join(parts).strip()
+
+
 def _assign_cells_from_tokens(
 	tokens: List[dict], bounds: List[Tuple[str, float, float]]
 ) -> Dict[str, str]:
@@ -950,6 +1002,9 @@ def _extract_by_words_projection(file_obj, password: Optional[str]) -> pd.DataFr
 				W = page.width
 				bounds = [(k, W * a, W * b) for (k, a, b) in SCB_RELATIVE_BOUNDS]
 
+			# x เริ่มของโซน Description/Note
+			desc_x0 = _get_desc_x0(bounds, page.width)
+
 			words = (
 				page.extract_words(extra_attrs=['x0', 'x1', 'top', 'bottom', 'text'])
 				or []
@@ -957,7 +1012,6 @@ def _extract_by_words_projection(file_obj, password: Optional[str]) -> pd.DataFr
 			if not words:
 				continue
 
-			# หา y เริ่มข้อมูล
 			start_y = (
 				min(
 					[
@@ -970,7 +1024,6 @@ def _extract_by_words_projection(file_obj, password: Optional[str]) -> pd.DataFr
 				- 4
 			)
 
-			# กลุ่มเป็นบรรทัด
 			y_tol = 4.5
 			lines: List[List[dict]] = []
 			for w in sorted(
@@ -1002,7 +1055,7 @@ def _extract_by_words_projection(file_obj, password: Optional[str]) -> pd.DataFr
 
 				base = _assign_cells_from_tokens(line_tokens, bounds)
 
-				# รวมบรรทัดถัดไปจนกว่าจะเจอวันที่ใหม่
+				# ต่อบรรทัดถัด ๆ ไป
 				j = i + 1
 				while j < len(lines):
 					nxt_tokens = lines[j]
@@ -1014,43 +1067,47 @@ def _extract_by_words_projection(file_obj, password: Optional[str]) -> pd.DataFr
 						r'\b\d{4}-\d{2}-\d{2}\b', nxt_text
 					):
 						break
+
 					nxt_cells = _assign_cells_from_tokens(nxt_tokens, bounds)
-					# ต่อเวลา
+
 					if base.get('tx_datetime') and _time_only_re.match(
 						(nxt_cells.get('tx_datetime') or '').strip()
 					):
 						base['tx_datetime'] = (
 							base['tx_datetime'] + ' ' + nxt_cells['tx_datetime']
 						).strip()
-					# เติมช่องที่ยังว่าง
-					for k in [
+
+					columns_to_fill = [
 						'code_channel_raw',
 						'debit_amount',
 						'credit_amount',
 						'balance_amount',
-					]:
+					]
+					for k in columns_to_fill:
 						if (not base.get(k)) and nxt_cells.get(k):
 							base[k] = nxt_cells[k]
-					# ต่อ description จากคอลัมน์ description โดยตรง
+
 					dtxt = nxt_cells.get('description_text', '')
 					if dtxt and not _is_disclaimer(dtxt):
 						base['description_text'] = (
 							base.get('description_text', '')
-							+ ('\n' if base.get('description_text') else '')
+							+ ('\\n' if base.get('description_text') else '')
 							+ dtxt
 						).strip()
-					# หรือถ้าบรรทัดนี้ดูเหมือนเป็น DESC/NOTE ทั้งบรรทัด
 					elif _looks_desc_line(nxt_text):
 						base['description_text'] = (
 							base.get('description_text', '')
-							+ ('\n' if base.get('description_text') else '')
+							+ ('\\n' if base.get('description_text') else '')
 							+ nxt_text
 						).strip()
 					j += 1
 
-				# block-level extraction: ถ้ายังไม่มี description ให้ดึงจากทั้งบล็อก i..j
+				# ถ้ายังไม่มี description_text ให้ดูจากโซนขวาหลังเส้นแบ่ง (desc_x0)
 				if not (base.get('description_text') or '').strip():
-					blk_desc = _extract_desc_note_from_block(lines[i:j])
+					y0 = lines[i][0]['top'] - 2
+					y1 = lines[(j - 1 if j > i else i)][0]['bottom'] + 2
+					raw_right = _collect_desc_block_text(page, y0, y1, desc_x0)
+					blk_desc = _extract_desc_note_from_text(raw_right)
 					if blk_desc and not _is_disclaimer(blk_desc):
 						base['description_text'] = blk_desc
 

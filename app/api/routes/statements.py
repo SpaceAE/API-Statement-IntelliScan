@@ -158,12 +158,18 @@ async def predict(
 	except IncorrectPasswordException:
 		raise HTTPException(
 			status_code=403,
-			detail={'message': 'Incorrect password for the encrypted PDF.'},
+			detail={
+				'message': 'Incorrect password for the encrypted PDF.',
+				'code': 'PASSWORD_INCORRECT',
+			},
 		)
 	except PasswordRequiredException:
 		raise HTTPException(
-			status_code=422,
-			detail={'message': 'Password is required for this encrypted PDF.'},
+			status_code=403,  # << เปลี่ยนเป็น 403
+			detail={
+				'message': 'Password is required for this encrypted PDF.',
+				'code': 'PASSWORD_REQUIRED',
+			},
 		)
 
 	# 2) ตัดสินชนิดไฟล์จากนามสกุล/Content-Type
