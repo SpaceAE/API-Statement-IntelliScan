@@ -13,7 +13,12 @@ from app.core.file import (
 	read_file,
 )
 from app.core.model import predict_proba_df, summarize_document
-from app.core.pdf_to_csv import extract_statement_df
+from app.core.pdf_to_csv import (
+	# ← เพิ่มสอง Exception ด้านล่าง (มาจากไฟล์ pdf_to_csv.py ที่เราเพิ่ม brand gate)
+	StatementFormatUnsupported,
+	StatementParsingFailed,
+	extract_statement_df,
+)
 from app.models.request import PredictForm
 from app.models.response import (
 	PredictResponseWithDetails,
@@ -21,7 +26,6 @@ from app.models.response import (
 )
 
 APP_DEBUG = os.getenv('APP_DEBUG', '1') in ('1', 'true', 'True')
-
 router = APIRouter(prefix='/statements', tags=['Statements'])
 
 
@@ -48,9 +52,8 @@ async def predict(
 ) -> PredictResponseWithDetails:
 	file, password = form.file, form.password
 
-	if (
-		file.content_type != 'application/pdf'
-		or file.filename.split('.')[-1].lower() != 'pdf'
+	if (file.content_type != 'application/pdf') or (
+		file.filename.split('.')[-1].lower() != 'pdf'
 	):
 		raise HTTPException(
 			status_code=400,
@@ -58,15 +61,19 @@ async def predict(
 		)
 
 	try:
+		# ลองเปิด/ปลดล็อกไฟล์ก่อน (อาจโยน IncorrectPassword/PasswordRequired)
 		read_file(file.file, password)
 		file.file.seek(0)
 
-		# ดึงพร้อม meta เพื่อช่วย debug บน Swagger เมื่อเปิด APP_DEBUG
+		# ดึงข้อมูลพร้อม meta (เพื่อ debug)
 		df, meta = extract_statement_df(file.file, password=password, return_meta=True)  # type: ignore
 		if df.empty:
-			detail = {'message': 'No transactions detected in the PDF.'}
+			detail = {
+				'message': 'No transactions detected in the PDF.',
+				'code': 'NO_TRANSACTIONS',
+			}
 			if APP_DEBUG:
-				detail['debug'] = meta  # แสดงจำนวนตาราง/บรรทัดที่ตรวจพบ
+				detail['debug'] = meta
 			raise HTTPException(status_code=422, detail=detail)
 
 		required_cols = [
@@ -81,7 +88,10 @@ async def predict(
 		if missing:
 			raise HTTPException(
 				status_code=422,
-				detail={'message': f'Missing required columns: {missing}'},
+				detail={
+					'message': f'Missing required columns: {missing}',
+					'code': 'MISSING_COLUMNS',
+				},
 			)
 
 		df_model = df[required_cols].copy()
@@ -90,7 +100,6 @@ async def predict(
 				df_model[num_col], errors='coerce'
 			).fillna(0.0)
 
-		# โมเดลอ่านจาก DataFrame ได้โดยตรง (ไม่จำเป็นต้องผ่าน CSV อีกต่อ)
 		probas = predict_proba_df(df_model)
 		threshold = float(os.getenv('MODEL_THRESHOLD', '0.5'))
 		summary = summarize_document(probas, threshold=threshold)
@@ -121,6 +130,23 @@ async def predict(
 			transactions=items,
 		)
 
+	except StatementFormatUnsupported as e:
+		# ไม่ใช่ SCB หรือรูปแบบไม่รองรับ
+		detail = {'message': str(e), 'code': 'UNSUPPORTED_BANK'}
+		if APP_DEBUG:
+			detail['hint'] = 'Only SCB statements are supported.'
+		raise HTTPException(status_code=422, detail=detail)
+
+	except StatementParsingFailed as e:
+		# ตรวจพบว่าเป็น SCB แต่ parse ไม่ได้
+		detail = {'message': str(e), 'code': 'PARSE_FAILED'}
+		if APP_DEBUG:
+			# แนบข้อมูลช่วย debug เพิ่มเติม
+			detail.setdefault('debug', {}).update(
+				{'note': 'SCB brand detected but no rows found'}
+			)
+		raise HTTPException(status_code=422, detail=detail)
+
 	except IncorrectPasswordException:
 		raise HTTPException(
 			status_code=403,
@@ -149,9 +175,8 @@ async def predict(
 async def predict_csv(form: Annotated[PredictForm, Depends(PredictForm.as_form)]):
 	file, password = form.file, form.password
 
-	if (
-		file.content_type != 'application/pdf'
-		or file.filename.split('.')[-1].lower() != 'pdf'
+	if (file.content_type != 'application/pdf') or (
+		file.filename.split('.')[-1].lower() != 'pdf'
 	):
 		raise HTTPException(
 			status_code=400,
@@ -162,12 +187,16 @@ async def predict_csv(form: Annotated[PredictForm, Depends(PredictForm.as_form)]
 		read_file(file.file, password)
 		file.file.seek(0)
 
-		df = extract_statement_df(file.file, password=password)
+		# ใช้ return_meta เพื่อ debug ได้ด้วยถ้าจำเป็น
+		df, meta = extract_statement_df(file.file, password=password, return_meta=True)  # type: ignore
 		if df.empty:
-			raise HTTPException(
-				status_code=422,
-				detail={'message': 'No transactions detected in the PDF.'},
-			)
+			detail = {
+				'message': 'No transactions detected in the PDF.',
+				'code': 'NO_TRANSACTIONS',
+			}
+			if APP_DEBUG:
+				detail['debug'] = meta
+			raise HTTPException(status_code=422, detail=detail)
 
 		required_cols = [
 			'tx_datetime',
@@ -181,7 +210,10 @@ async def predict_csv(form: Annotated[PredictForm, Depends(PredictForm.as_form)]
 		if missing:
 			raise HTTPException(
 				status_code=422,
-				detail={'message': f'Missing required columns: {missing}'},
+				detail={
+					'message': f'Missing required columns: {missing}',
+					'code': 'MISSING_COLUMNS',
+				},
 			)
 
 		df_model = df[required_cols].copy()
@@ -206,6 +238,20 @@ async def predict_csv(form: Annotated[PredictForm, Depends(PredictForm.as_form)]
 			media_type='text/csv',
 			headers={'Content-Disposition': f'attachment; filename="{fname}"'},
 		)
+
+	except StatementFormatUnsupported as e:
+		detail = {'message': str(e), 'code': 'UNSUPPORTED_BANK'}
+		if APP_DEBUG:
+			detail['hint'] = 'Only SCB statements are supported.'
+		raise HTTPException(status_code=422, detail=detail)
+
+	except StatementParsingFailed as e:
+		detail = {'message': str(e), 'code': 'PARSE_FAILED'}
+		if APP_DEBUG:
+			detail.setdefault('debug', {}).update(
+				{'note': 'SCB brand detected but no rows found'}
+			)
+		raise HTTPException(status_code=422, detail=detail)
 
 	except IncorrectPasswordException:
 		raise HTTPException(
