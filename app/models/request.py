@@ -9,3 +9,9 @@ class PredictForm(BaseModel):
 		None, description='Password for authenticating statement file'
 	)
 	file: UploadFile = File(..., description='Upload statement pdf')
+
+
+class PredictQueryParam(BaseModel):
+	only_fraud: Optional[bool] = Form(
+		False, description='Return only fraud predictions'
+	)

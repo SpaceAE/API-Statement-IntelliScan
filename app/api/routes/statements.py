@@ -1,13 +1,13 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Form, HTTPException
+from fastapi import APIRouter, Form, HTTPException, Query
 
 from app.core.file import (
 	IncorrectPasswordException,
 	PasswordRequiredException,
 	read_file,
 )
-from app.models.request import PredictForm
+from app.models.request import PredictForm, PredictQueryParam
 from app.models.response import PredictResponse
 
 router = APIRouter(
@@ -108,6 +108,7 @@ router = APIRouter(
 )
 async def predict(
 	form: Annotated[PredictForm, Form(media_type='multipart/form-data')],
+	query: Annotated[PredictQueryParam, Query()],
 ) -> PredictResponse:
 	file, password = form.file, form.password
 	if (
@@ -120,9 +121,15 @@ async def predict(
 		)
 
 	try:
-		read_file(file.file, password)
+		file = read_file(file.file, password)
 
-		# Dummy prediction logic for demonstration purposes
+		# todo: preprocessing
+
+		# todo: if ext pdf -> pdf to csv
+
+		# todo: csv -> predict model
+
+		# todo: response
 		return PredictResponse(
 			prediction='normal',
 			confidence=0.95,
