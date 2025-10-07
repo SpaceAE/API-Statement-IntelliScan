@@ -1,4 +1,3 @@
-# app/core/pdfToCSV.py
 from __future__ import annotations
 
 import logging
@@ -164,6 +163,7 @@ HEADER_MAP.update(
 	}
 )
 
+
 TARGET_COLS = [
 	'tx_datetime',
 	'code_channel_raw',
@@ -172,6 +172,7 @@ TARGET_COLS = [
 	'balance_amount',
 	'description_text',
 ]
+
 
 # =======================
 # Heuristics / patterns
@@ -201,6 +202,7 @@ _HEADER_NOISE_TERMS = [
 _HEADER_NOISE_RE = re.compile(
 	'|'.join([re.escape(x) for x in _HEADER_NOISE_TERMS]), re.IGNORECASE
 )
+
 
 _amount_clean = re.compile(r'[^0-9\.\-]+')
 
@@ -265,10 +267,23 @@ def _to_float_or_none(x):
 	s = str(x).strip()
 	if s == '' or s.lower() in {'-', 'na', 'none'}:
 		return None
+
+	# NEW: normalize เคสแยก token เป็นชิ้น ๆ
+	# รวมช่องว่างรอบจุด/คอมม่า -> ให้เป็น "ติดกัน"
+	s = re.sub(r'\s*\.\s*', '.', s)
+	s = re.sub(r'\s*,\s*', ',', s)
+	# วงเล็บติดเลข เช่น "( 100,000 )" -> "(100,000)"
+	s = re.sub(r'\(\s*', '(', s)
+	s = re.sub(r'\s*\)', ')', s)
+	# เคสติดเครื่องหมายลบด้านท้าย เช่น "100,000-" -> "-100,000"
+	if re.match(r'^\d[\d,]*-\s*$', s):
+		s = '-' + s.rstrip('-').strip()
+
 	neg = s.startswith('(') and s.endswith(')')
 	s = s.replace('(', '').replace(')', '')
 	s = s.replace('฿', '').replace(',', '').replace(' ', '')
-	s = _amount_clean.sub('', s)
+	s = _amount_clean.sub('', s)  # เหลือเฉพาะ 0-9 . -
+
 	if s in {'', '-', '.', '-.'}:
 		return None
 	try:
@@ -427,7 +442,16 @@ def _merge_duplicate_mapped_cols(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------- money & code-channel helpers ----------
 _MONEY_RE = re.compile(
-	r'(?<![A-Za-z/])([()\-]?\d{2,}(?:,\d{3})*(?:\.\d{1,2})?|\d+\.\d{1,2})(?![:A-Za-z/])'
+	r"""
+   (?<!\d:)                           # ด้านซ้ายห้ามเป็น "เลขตามด้วยโคลอน" (กัน 10:)
+   (?:
+       [()\-]?\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?   # มีคอมม่าเป็นหลักพัน เช่น 100,000.00
+     | [()\-]?\d+\.\d{1,2}                        # มีทศนิยม เช่น 0.50, 25.00
+     | [()\-]?\d{3,}                              # จำนวนเต็มตั้งแต่ 3 หลักขึ้นไป (กัน 00/10)
+   )
+   (?!:\d)                           # ด้านขวาห้ามเป็น ":เลข" (กัน :00)
+   """,
+	re.VERBOSE,
 )
 
 
@@ -878,6 +902,7 @@ HEADER_KEYS = [
 	),
 ]
 
+
 SCB_RELATIVE_BOUNDS = [
 	('tx_datetime', 0.00, 0.17),
 	('code_channel_raw', 0.17, 0.36),
@@ -1235,7 +1260,17 @@ def _parse_text_rows_by_gaps(lines: List[str]) -> pd.DataFrame:
 						+ ln
 					)
 
-			money = [m.group(1) for m in _MONEY_RE.finditer(ln)]
+			raw_money_matches = [m for m in _MONEY_RE.finditer(ln)]
+
+			def _not_time_fragment(m):
+				start, end = m.span()
+				left = ln[max(0, start - 2) : start]
+				right = ln[end : min(len(ln), end + 2)]
+				# กันรูปแบบ d:dd ทั้งซ้ายและขวา
+				return not (re.match(r'\d:$', left) or re.match(r'^:\d', right))
+
+			money = [m.group(0) for m in raw_money_matches if _not_time_fragment(m)]
+
 			if money:
 				for field in ('debit_amount', 'credit_amount', 'balance_amount'):
 					if pending.get(field) is None and money:
