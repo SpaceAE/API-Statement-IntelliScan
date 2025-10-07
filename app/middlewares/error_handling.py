@@ -26,7 +26,7 @@ async def validation_exception_handler(
 ) -> JSONResponse:
 	"""Handle validation errors and format them into a user-friendly response."""
 	error_details: List[str] = []
-	print(exc.errors())
+	# print(exc.errors())
 
 	for error in exc.errors():
 		loc = ' -> '.join(str(x) for x in error.get('loc', []))

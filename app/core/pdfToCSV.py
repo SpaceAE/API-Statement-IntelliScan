@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 import time
 from typing import Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import pdfplumber
+
+from app.core.config import settings
 
 # -----------------------------
 # pdfminer (text fallback)
@@ -23,15 +24,14 @@ except Exception:  # pragma: no cover - optional dependency
 # =======================
 # Config / Logging
 # =======================
-STRICT_AMOUNT_REQUIRED = os.getenv('STRICT_AMOUNT_REQUIRED', '0') in (
-	'1',
-	'true',
-	'True',
-)
+STRICT_AMOUNT_REQUIRED = settings.STRICT_AMOUNT_REQUIRED
+
+if STRICT_AMOUNT_REQUIRED:
+	print('Strict amount checking is enabled')
 
 logger = logging.getLogger('app.core.pdfToCSV')
 if not logger.handlers:
-	_level = os.getenv('STATEMENT_LOG_LEVEL', 'INFO').upper()
+	_level = settings.ENVIRONMENT.upper()
 	_handler = logging.StreamHandler()
 	_handler.setFormatter(
 		logging.Formatter('[%(asctime)s] [%(levelname)s] pdfToCSV: %(message)s')
@@ -1291,30 +1291,41 @@ _BRAND_HINTS = {
 		'ธนาคารไทยพาณิชย์',
 		'scb easy',
 		'statement with memo',
-		'รายการเดินบัญชี พร้อมบันทึกช่วยจำ',
+		'รายการเดินบัญชี พร้อมบันทึกช่วยจำ',  # พบบ่อยในสเตทเมนต์ SCB
 	],
 }
 
 
 def _detect_bank_brand(file_obj, password: Optional[str]) -> Optional[str]:
 	"""
-	อ่านข้อความหน้าแรก/สองหน้า เพื่อตรวจว่าเป็นสเตทเมนต์ของแบรนด์ใด
-	คืนค่า: 'scb' | None
+	อ่านข้อมูลหน้าแรกของไฟล์เพื่อระบุว่าเป็นสเตทเมนต์จากแบรนด์ใด
+	คืนค่า: 'scb' หรือ None
 	"""
-	# 1) pdfminer (เร็วและง่าย ถ้ามีติดตั้ง)
 	try:
+		# ตรวจจับจาก pdfminer
 		if _pdfminer_extract_text is not None:
 			file_obj.seek(0)
 			txt = _pdfminer_extract_text(file_obj) or ''
 			norm = re.sub(r'\s+', ' ', txt).strip().lower()
-			for brand, hints in _BRAND_HINTS.items():
-				if any(h in norm for h in hints):
-					file_obj.seek(0)
-					return brand
-	except Exception:
+
+			# คำสำคัญที่ใช้ในการตรวจจับ SCB
+			scb_keywords = [
+				'siam commercial bank',
+				'scb call center',
+				'ธนาคารไทยพาณิชย์',
+				'scb easy',
+				'statement with memo',
+				'รายการเดินบัญชี พร้อมบันทึกช่วยจำ',
+				'ธนาคารไทยพาณิชย์',
+			]
+			if any(keyword in norm for keyword in scb_keywords):
+				file_obj.seek(0)
+				return 'scb'
+	except Exception as e:
+		print(f'Error in pdfminer detection: {e}')
 		pass
 
-	# 2) pdfplumber (สำรอง แต่อ่านได้แม่นยำ)
+	# fallback ใช้ pdfplumber
 	try:
 		file_obj.seek(0)
 		with pdfplumber.open(file_obj, password=password) as pdf:
@@ -1324,11 +1335,32 @@ def _detect_bank_brand(file_obj, password: Optional[str]) -> Optional[str]:
 				t = p.extract_text() or ''
 				buf.append(t)
 			norm = re.sub(r'\s+', ' ', ' '.join(buf)).strip().lower()
-			for brand, hints in _BRAND_HINTS.items():
-				if any(h in norm for h in hints):
-					file_obj.seek(0)
-					return brand
-	except Exception:
+
+			# คำสำคัญที่ใช้ในการตรวจจับ SCB
+			scb_keywords = [
+				'siam commercial bank',
+				'scb call center',
+				'ธนาคารไทยพาณิชย์',
+				'scb easy',
+				'statement with memo',
+				'รายการเดินบัญชี พร้อมบันทึกช่วยจำ',
+				'บันทึกช่วยจำ',
+				'ธนาคาร',
+				'เลขที่บัญชี',
+				'ประเภทบัญชี',
+				'ยอดคงเหลือ',
+				'ถอน',
+				'ฝาก',
+				'debit',
+				'credit',
+				'บัญชี',
+				'ธนาคารไทยพาณิชย์',
+			]
+			if any(keyword in norm for keyword in scb_keywords):
+				file_obj.seek(0)
+				return 'scb'
+	except Exception as e:
+		print(f'Error in pdfplumber detection: {e}')
 		pass
 
 	file_obj.seek(0)
@@ -1336,8 +1368,6 @@ def _detect_bank_brand(file_obj, password: Optional[str]) -> Optional[str]:
 
 
 # ---------- public API ----------
-
-
 def extract_statement_df(
 	file_obj, password: Optional[str] = None, return_meta: bool = False
 ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, Dict]]:
@@ -1348,7 +1378,7 @@ def extract_statement_df(
 	if brand != 'scb':
 		# ไม่ใช่ SCB หรือไม่รู้จักแบรนด์ -> ไม่รองรับ
 		raise StatementFormatUnsupported(
-			'รูปแบบสเตทเมนต์นี้ไม่รองรับ โปรดอัปโหลดสเตทเมนต์จากธนาคาร SCB เท่านั้น'
+			'This statement format is not supported. Please upload statements from SCB.'
 		)
 
 	# 1) tables-first

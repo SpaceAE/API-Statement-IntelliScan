@@ -1,32 +1,30 @@
-# app/api/routes/statements.py
 import io
-import os
 import re
 from typing import Annotated
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Form, HTTPException, Query
 
+from app.core.config import settings
 from app.core.file import (
 	IncorrectPasswordException,
 	PasswordRequiredException,
-	read_file,  # ต้องอัปเดตให้คืน bytes และตรวจ PDF ที่เข้ารหัสใน file.py
+	read_file,
 )
 from app.core.model import predict_proba_df, summarize_document
-from app.core.pdfToCSV import (  # ✅ ใช้ชื่อไฟล์ใหม่ pdfToCSV.py
+from app.core.pdfToCSV import (
 	StatementFormatUnsupported,
-	StatementParsingFailed,
+	_detect_bank_brand,
 	extract_statement_df,
 )
-from app.models.request import PredictForm
-from app.models.response import (
-	PredictResponse,
-	TransactionResult,
+from app.models.request import PredictForm, PredictQueryParam
+from app.models.response import PredictResponse, TransactionResult
+
+router = APIRouter(
+	prefix='/statements',
+	tags=['Statements'],
 )
 
-router = APIRouter(prefix='/statements', tags=['Statements'])
-
-# ===== Required columns (ใช้ร่วมทั้ง CSV/XLSX และผลจาก PDF Extract) =====
 _REQUIRED_COLS = [
 	'tx_datetime',
 	'code_channel_raw',
@@ -36,7 +34,6 @@ _REQUIRED_COLS = [
 	'description_text',
 ]
 
-# Content-Type ที่อนุญาตสำหรับ table
 _ALLOWED_CT = {
 	'text/csv',
 	'application/csv',
@@ -61,9 +58,8 @@ def _read_tb_file_to_df(filename: str, content_type: str, raw: bytes) -> pd.Data
 		if ext == 'csv' or content_type in {'text/csv', 'application/csv'}:
 			df = pd.read_csv(bio)
 		elif ext in {'xlsx', 'xls'} or content_type in _ALLOWED_CT:
-			df = pd.read_excel(bio, engine='openpyxl')
+			df = pd.read_excel(bio, engine=None)
 		else:
-			# fallback ลอง CSV
 			bio.seek(0)
 			df = pd.read_csv(bio)
 	except Exception as e:
@@ -75,7 +71,6 @@ def _read_tb_file_to_df(filename: str, content_type: str, raw: bytes) -> pd.Data
 			},
 		)
 
-	df = df.copy()
 	df.columns = [_norm_col(str(c)) for c in df.columns]
 
 	missing = [c for c in _REQUIRED_COLS if c not in df.columns]
@@ -86,10 +81,6 @@ def _read_tb_file_to_df(filename: str, content_type: str, raw: bytes) -> pd.Data
 				'message': 'Missing required columns',
 				'missing': missing,
 				'required': _REQUIRED_COLS,
-				'note': (
-					'ต้องมี: tx_datetime, code_channel_raw, debit_amount, '
-					'credit_amount, balance_amount, description_text'
-				),
 			},
 		)
 	return df
@@ -97,107 +88,156 @@ def _read_tb_file_to_df(filename: str, content_type: str, raw: bytes) -> pd.Data
 
 def _coerce_and_format(df: pd.DataFrame) -> pd.DataFrame:
 	out = df[_REQUIRED_COLS].copy()
-
-	# amounts
 	for col in ['debit_amount', 'credit_amount', 'balance_amount']:
 		out[col] = pd.to_numeric(out[col], errors='coerce').fillna(0.0)
 
-	# datetime -> DD/MM/YYYY HH:mm (ฝั่งโมเดลของคุณอาจไม่บังคับฟอร์แมตนี้ แต่คงไว้ตามเดิม)
 	dt_parsed = pd.to_datetime(out['tx_datetime'], errors='coerce', dayfirst=True)
 	mask = dt_parsed.notna()
 	out.loc[mask, 'tx_datetime'] = dt_parsed[mask].dt.strftime('%d/%m/%Y %H:%M')
-
 	out['description_text'] = out['description_text'].astype(str).fillna('')
 	return out
 
 
 @router.post(
 	'/predict',
-	summary='Analyze Statement Risk (CSV/XLSX or PDF)',
-	description=(
-		'Upload a statement file (CSV/XLSX or PDF; PDF may be password-protected). '
-		'Auto-detects type, parses transactions, scores risk per row and returns JSON\n'
-		'Use query `only_fraud=true` to include only risky rows in `transactions`.'
-	),
+	summary='Analyze Statement Risk',
+	description='Analyze and classify statement documents for risk assessment',
 	responses={
-		200: {'description': 'OK (PredictResponse)'},
-		400: {'description': 'Invalid file'},
-		403: {'description': 'Wrong password for encrypted PDF'},
-		422: {'description': 'Validation / No transactions'},
-		500: {'description': 'Internal error'},
+		200: {
+			'description': 'Successful Response',
+			'content': {
+				'application/json': {
+					'example': {'prediction': 'fraud', 'confidence': 0.91}
+				}
+			},
+		},
+		400: {
+			'description': 'Bad Request',
+			'content': {
+				'application/json': {
+					'examples': {
+						'invalid_file_type': {
+							'summary': 'Invalid file type',
+							'value': {
+								'message': {
+									'Invalid file type. Only PDF files are accepted.'
+								}
+							},
+						},
+						'statement_format_unsupported': {
+							'summary': 'Statement format is not supported',
+							'value': {
+								'message': 'This statement format is not supported. '
+								'Please upload statements from SCB.'
+							},
+						},
+					}
+				}
+			},
+		},
+		403: {
+			'description': 'Forbidden',
+			'content': {
+				'application/json': {
+					'examples': {
+						'incorrect_password': {
+							'summary': 'Incorrect Password',
+							'value': {
+								'message': 'Incorrect password for the encrypted PDF.'
+							},
+						},
+					}
+				}
+			},
+		},
+		422: {
+			'description': 'Unprocessable Entity',
+			'content': {
+				'application/json': {
+					'examples': {
+						'validation_error': {
+							'summary': 'Validation error',
+							'value': {
+								'message': 'Validation error',
+								'errors': [
+									'body -> file: Value error, Expected UploadFile, '
+									"received: <class 'str'>"
+								],
+							},
+						},
+						'missing_required_field': {
+							'summary': 'Missing Required Field',
+							'value': {
+								'message': 'Validation error',
+								'errors': ['Missing required field: body -> file'],
+							},
+						},
+						'password_required': {
+							'summary': 'Password Required',
+							'value': {
+								'message': {
+									'Password is required for this encrypted PDF.'
+								}
+							},
+						},
+					}
+				}
+			},
+		},
+		500: {
+			'description': 'Internal Server Error',
+			'content': {
+				'application/json': {'example': {'message': 'Internal server error'}}
+			},
+		},
 	},
 )
 async def predict(
-	form: Annotated[PredictForm, Depends(PredictForm.as_form)],
-	only_fraud: Annotated[
-		bool,
-		Query(
-			description=(
-				"If true, 'transactions' includes only rows where is_fraud=true "
-				'(summary still computed from all rows).'
-			)
-		),
-	] = False,
+	form: Annotated[PredictForm, Form(media_type='multipart/form-data')],
+	query: Annotated[PredictQueryParam, Query()],
 ) -> PredictResponse:
-	"""
-	Flow:
-	- ใช้ file.py: read_file(…) -> bytes + ตรวจ PDF (รหัสผ่าน/เข้ารหัส)
-	- ถ้าเป็น PDF -> extract_statement_df(BytesIO, password)
-	- ถ้าเป็น CSV/XLSX -> pandas.read_* แล้ว normalize
-	- ส่งเข้าโมเดล -> summarize -> สร้างรายการ TransactionResult[]
-	"""
-	up = form.file
-	password = form.password
-	fname = (up.filename or '').lower()
+	file, password = form.file, form.password
+	fname = (file.filename or '').lower()
 	ext = fname.rsplit('.', 1)[-1] if '.' in fname else ''
-	ctype = (up.content_type or '').lower()
+	ctype = (file.content_type or '').lower()
 
-	# 1) อ่านทั้งหมดเป็น bytes + ให้ file.py ตรวจ PDF encryption/password
 	try:
-		raw = read_file(up.file, password)  # ✅ ควรอัปเดต read_file ให้คืน bytes เสมอ
-	except IncorrectPasswordException:
-		raise HTTPException(
-			status_code=403,
-			detail={
-				'message': 'Incorrect password for the encrypted PDF.',
-				'code': 'PASSWORD_INCORRECT',
-			},
-		)
-	except PasswordRequiredException:
-		raise HTTPException(
-			status_code=403,  # << เปลี่ยนเป็น 403
-			detail={
-				'message': 'Password is required for this encrypted PDF.',
-				'code': 'PASSWORD_REQUIRED',
-			},
-		)
+		# อ่านไฟล์เป็น bytes + ตรวจ PDF encryption/password
+		raw = read_file(file.file, password)
 
-	# 2) ตัดสินชนิดไฟล์จากนามสกุล/Content-Type
-	is_pdf = ext == 'pdf' or ctype == 'application/pdf'
-	is_table = (ext in {'csv', 'xlsx', 'xls'}) or (ctype in _ALLOWED_CT)
+		# ตัดสินชนิดไฟล์
+		is_pdf = ext == 'pdf' or ctype == 'application/pdf'
+		is_table = ext in {'csv', 'xlsx', 'xls'} or ctype in _ALLOWED_CT
 
-	# 3) แตกแขนง
-	try:
 		if is_pdf and not is_table:
-			# ----- PDF branch -----
 			bio = io.BytesIO(raw)
-			df, meta = extract_statement_df(bio, password=password, return_meta=True)  # type: ignore
+			df, _meta = extract_statement_df(bio, password=password, return_meta=True)
 			if df.empty:
 				raise HTTPException(
 					status_code=422,
 					detail={'message': 'No transactions detected in the PDF.'},
 				)
+
+			# ตรวจสอบฟอร์แมตของ statement โดยใช้ _detect_bank_brand
+			brand = _detect_bank_brand(file.file, password=password)
+			if brand != 'scb':
+				raise HTTPException(
+					status_code=400,
+					detail={
+						'message': 'This statement format is not supported. '
+						'Please upload statements from SCB.'
+					},
+				)
+
 		elif is_table and not is_pdf:
-			# ----- CSV/XLSX branch -----
 			df = _read_tb_file_to_df(fname, ctype, raw)
-		elif is_table and is_pdf:
-			# กรณีแปลก
+
+		elif is_pdf and is_table:
 			raise HTTPException(
 				status_code=400,
 				detail={'message': 'Ambiguous file type (both table & PDF detected).'},
 			)
 		else:
-			# ไม่เข้าเงื่อนไข
 			raise HTTPException(
 				status_code=400,
 				detail={
@@ -205,59 +245,84 @@ async def predict(
 					'allowed_content_types': sorted(_ALLOWED_CT | {'application/pdf'}),
 				},
 			)
+
+		# ตรวจสอบการขาดหายของคอลัมน์ที่จำเป็น
+		missing = [c for c in _REQUIRED_COLS if c not in df.columns]
+		if missing:
+			raise HTTPException(
+				status_code=422,
+				detail={'message': f'Missing required columns: {missing}'},
+			)
+
+		# ตรวจสอบให้แน่ใจว่า DataFrame มีข้อมูลที่ต้องการ
+		if df.empty:
+			raise HTTPException(
+				status_code=422,
+				detail={'message': 'No valid transactions in the provided data.'},
+			)
+
+		# preprocessing
+		df_model = _coerce_and_format(df)
+
+		# predict
+		probas = predict_proba_df(df_model)
+
+		threshold = settings.MODEL_THRESHOLD
+		summary = summarize_document(probas, threshold=threshold)
+
+		# build items
+		items: list[TransactionResult] = []
+		for i, row in df_model.reset_index(drop=True).iterrows():
+			p = float(probas.loc[i])
+			items.append(
+				TransactionResult(
+					idx=int(i),
+					tx_datetime=str(row.tx_datetime),
+					code_channel_raw=str(row.code_channel_raw),
+					debit_amount=float(row.debit_amount),
+					credit_amount=float(row.credit_amount),
+					balance_amount=float(row.balance_amount),
+					description_text=str(row.description_text),
+					fraud_score=round(p, 4),
+					is_fraud=bool(p >= threshold),
+				)
+			)
+
+		fraud_items = [tx for tx in items if tx.is_fraud]
+		transactions_total = len(df_model)
+		fraud_count = len(fraud_items)
+
+		# ใช้ query.only_fraud
+		transactions_out = fraud_items if query.only_fraud else items
+
+		return PredictResponse(
+			prediction=summary['prediction'],
+			confidence=summary['confidence'],
+			fraud_count=fraud_count,
+			transactions_count=transactions_total,
+			transactions=transactions_out,
+		)
+
+	except IncorrectPasswordException:
+		raise HTTPException(
+			status_code=403,
+			detail={'message': 'Incorrect password for the encrypted PDF.'},
+		)
+	except PasswordRequiredException:
+		raise HTTPException(
+			status_code=403,
+			detail={'message': 'Password is required for this encrypted PDF.'},
+		)
 	except StatementFormatUnsupported as e:
 		raise HTTPException(
-			status_code=422, detail={'message': str(e), 'code': 'UNSUPPORTED_BANK'}
+			status_code=400,
+			detail={'message': str(e)},
 		)
-	except StatementParsingFailed as e:
+	except KeyError as e:
 		raise HTTPException(
-			status_code=422, detail={'message': str(e), 'code': 'PARSE_FAILED'}
+			status_code=500, detail={'message': f'KeyError occurred: {str(e)}'}
 		)
-
-	# 4) validate required cols + cast/format
-	missing = [c for c in _REQUIRED_COLS if c not in df.columns]
-	if missing:
+	except Exception as e:
 		raise HTTPException(
-			status_code=422,
-			detail={'message': f'Missing required columns: {missing}'},
+			status_code=500, detail={'message': f'Internal server error: {str(e)}'}
 		)
-
-	df_model = _coerce_and_format(df)
-
-	# 5) predict per row
-	probas = predict_proba_df(df_model)  # pd.Series
-	threshold = float(os.getenv('MODEL_THRESHOLD', '0.5'))
-	summary = summarize_document(probas, threshold=threshold)
-
-	# 6) build items
-	items: list[TransactionResult] = []
-	for i, row in df_model.reset_index(drop=True).iterrows():
-		p = float(probas.loc[i])
-		items.append(
-			TransactionResult(
-				idx=int(i),
-				tx_datetime=str(row.tx_datetime),
-				code_channel_raw=str(row.code_channel_raw),
-				debit_amount=float(row.debit_amount),
-				credit_amount=float(row.credit_amount),
-				balance_amount=float(row.balance_amount),
-				description_text=str(row.description_text),
-				fraud_score=round(p, 4),
-				is_fraud=bool(p >= threshold),
-			)
-		)
-
-	# หลังจาก build items และสรุป summary แล้ว
-	fraud_items = [tx for tx in items if tx.is_fraud]
-	fraud_count = len(fraud_items)
-	transactions_total = len(df_model)  # จำนวนรายการที่ประมวลผลทั้งหมด
-
-	transactions_out = fraud_items if only_fraud else items
-
-	return PredictResponse(
-		prediction=summary['prediction'],
-		confidence=summary['confidence'],
-		fraud_count=fraud_count,
-		transactions_count=transactions_total,
-		transactions=transactions_out,
-	)

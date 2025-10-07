@@ -14,6 +14,8 @@ class Settings(BaseSettings):
 	ENVIRONMENT: Literal['development', 'production'] = 'development'
 	API_PREFIX: str = '/api/v1'
 	MODEL_PATH: str = 'model.h5'
+	MODEL_THRESHOLD: float = 0.3
+	STRICT_AMOUNT_REQUIRED: bool = False
 
 
 settings = Settings()

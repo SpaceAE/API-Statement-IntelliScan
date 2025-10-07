@@ -24,9 +24,7 @@ def read_file(file: BinaryIO, password: Optional[str]) -> bytes:
 			if reader.is_encrypted:
 				if not password:
 					raise PasswordRequiredException('Password is required for PDF.')
-				result = reader.decrypt(password)
-				# pypdf: 0=fail, 1 or 2 = success
-				if result not in (1, 2):
+				if not reader.decrypt(password):
 					raise IncorrectPasswordException('Incorrect password for PDF.')
 		except IncorrectPasswordException:
 			raise
