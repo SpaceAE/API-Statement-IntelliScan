@@ -124,13 +124,6 @@ def _coerce_and_format(df: pd.DataFrame) -> pd.DataFrame:
 								}
 							},
 						},
-						'statement_format_unsupported': {
-							'summary': 'Statement format is not supported',
-							'value': {
-								'message': 'This statement format is not supported. '
-								'Please upload statements from SCB.'
-							},
-						},
 					}
 				}
 			},
@@ -187,7 +180,23 @@ def _coerce_and_format(df: pd.DataFrame) -> pd.DataFrame:
 		500: {
 			'description': 'Internal Server Error',
 			'content': {
-				'application/json': {'example': {'message': 'Internal server error'}}
+				'application/json': {
+					'examples': {
+						'internal_error': {
+							'summary': 'Internal Error',
+							'value': {
+								'message': 'Internal server error: <error details>'
+							},
+						},
+						'statement_format_unsupported': {
+							'summary': 'Statement format is not supported',
+							'value': {
+								'message': 'This statement format is not supported. '
+								'Please upload statements from SCB.'
+							},
+						},
+					}
+				}
 			},
 		},
 	},
@@ -310,12 +319,12 @@ async def predict(
 		)
 	except PasswordRequiredException:
 		raise HTTPException(
-			status_code=403,
+			status_code=422,
 			detail={'message': 'Password is required for this encrypted PDF.'},
 		)
 	except StatementFormatUnsupported as e:
 		raise HTTPException(
-			status_code=400,
+			status_code=500,
 			detail={'message': str(e)},
 		)
 	except KeyError as e:
