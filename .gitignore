@@ -15,6 +15,3 @@ wheels/
 # Environment variables
 .env*
 !.env.example
-
-# model
-*.h5
